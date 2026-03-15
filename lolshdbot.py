@@ -395,6 +395,7 @@ async def handle_start_send(query, context, user_id):
     sent_count = 0
     fail_count = 0
     last_edit = 0
+    auth_failed_emails = set()
 
     for future in asyncio.as_completed(all_tasks):
         if user_id in stop_flags:
@@ -414,6 +415,10 @@ async def handle_start_send(query, context, user_id):
         if result is True:
             sent_count += 1
             daily_sent[key] = daily_sent.get(key, 0) + 1
+        elif result == "auth_error":
+            fail_count += 1
+            email_name = key.rsplit("_", 1)[0]
+            auth_failed_emails.add(email_name)
         else:
             fail_count += 1
 
@@ -442,7 +447,15 @@ async def handle_start_send(query, context, user_id):
         if daily_sent.get(f"{em['email']}_{today}", 0) >= MAX_DAILY
     ]
 
-    if stopped:
+    if auth_failed_emails:
+        failed_list = "\n".join(f"• {e}" for e in auth_failed_emails)
+        final_text = (
+            f"❌ كلمة مرور خاطئة للايميلات التالية:\n{failed_list}\n\n"
+            "تأكد من تفعيل كلمة مرور التطبيقات في إعدادات Gmail.\n\n"
+            f"• تم الارسال: {sent_count}\n"
+            f"• تم الفشل: {fail_count}"
+        )
+    elif stopped:
         final_text = (
             f"⏹ تم إيقاف الارسال\n\n"
             f"• تم الارسال: {sent_count}\n"
@@ -511,46 +524,12 @@ async def send_email(sender_email, sender_password, to_email, subject, content, 
                 to_email, subject, content, photo_data
             )
             return True
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"Auth error from {sender_email}: {e}")
+            return "auth_error"
         except Exception as e:
             logger.error(f"Send error from {sender_email}: {e}")
             return False
-
-
-def _smtp_verify(email, password):
-    password = password.replace(" ", "")
-    ctx = ssl.create_default_context()
-    errors = []
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=15) as server:
-            server.login(email, password)
-        return
-    except smtplib.SMTPAuthenticationError:
-        raise
-    except Exception as e:
-        errors.append(e)
-    try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
-            server.ehlo()
-            server.starttls(context=ctx)
-            server.login(email, password)
-        return
-    except smtplib.SMTPAuthenticationError:
-        raise
-    except Exception as e:
-        errors.append(e)
-    raise errors[-1]
-
-
-async def verify_email(email, password):
-    try:
-        await asyncio.to_thread(_smtp_verify, email, password)
-        return True
-    except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"Auth error for {email}: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Verify error for {email}: {e}")
-        return None
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -576,45 +555,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        wait_msg = await update.message.reply_text(
-            "⏳ جاري التحقق من صحة الايميل وكلمة المرور..."
-        )
-
-        valid = await verify_email(email, password)
-
-        if valid is True:
-            user = get_user(user_id)
-            existing = [e for e in user["emails"] if e["email"] == email]
-            if existing:
-                existing[0]["password"] = password
-            else:
-                user["emails"].append({"email": email, "password": password})
-            save_user(user_id, user)
-            context.user_data["state"] = STATE_IDLE
-            await wait_msg.edit_text(
-                f"✅ تم تعيين الايميل بنجاح:\n{email}",
-                reply_markup=back_keyboard(),
-            )
-        elif valid is False:
-            await wait_msg.edit_text(
-                "❌ الايميل أو كلمة المرور غير صحيحة.\n"
-                "تأكد من تفعيل كلمة مرور التطبيقات في إعدادات Gmail.",
-                reply_markup=back_keyboard(),
-            )
+        user = get_user(user_id)
+        existing = [e for e in user["emails"] if e["email"] == email]
+        if existing:
+            existing[0]["password"] = password
         else:
-            user = get_user(user_id)
-            existing = [e for e in user["emails"] if e["email"] == email]
-            if existing:
-                existing[0]["password"] = password
-            else:
-                user["emails"].append({"email": email, "password": password})
-            save_user(user_id, user)
-            context.user_data["state"] = STATE_IDLE
-            await wait_msg.edit_text(
-                f"⚠️ تم حفظ الايميل لكن تعذّر التحقق منه الآن (مشكلة شبكة):\n{email}\n"
-                "سيتضح عند الإرسال إذا كانت كلمة المرور صحيحة.",
-                reply_markup=back_keyboard(),
-            )
+            user["emails"].append({"email": email, "password": password})
+        save_user(user_id, user)
+        context.user_data["state"] = STATE_IDLE
+        await update.message.reply_text(
+            f"✅ تم حفظ الايميل بنجاح:\n{email}",
+            reply_markup=back_keyboard(),
+        )
 
     elif state == STATE_SET_COUNT:
         text = update.message.text.strip() if update.message.text else ""
@@ -650,7 +602,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if total_remaining <= 0:
             await update.message.reply_text(
-                "❌ جميع الايميلات وصلت للحد اليومي، حاول غداً.",
+                              "❌ جميع الايميلات وصلت للحد اليومي، حاول غداً.",
                 reply_markup=back_keyboard(),
             )
             return
