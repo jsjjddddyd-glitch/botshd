@@ -538,7 +538,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         parts = text.split(":", 1)
         email = parts[0].strip()
-        password = parts[1].strip()
+        password = parts[1].strip().replace(" ", "")
 
         if "@" not in email:
             await update.message.reply_text(
